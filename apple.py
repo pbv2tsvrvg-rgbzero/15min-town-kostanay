@@ -45,8 +45,6 @@ KOSTANAY_UTM_CRS = "EPSG:32641"  # UTM zone 41N (60–66° в.д.) — Кост�
 SHOP_TAGS = ['supermarket', 'convenience', 'mall', 'department_store', 'grocery']
 MED_TAGS = ['pharmacy', 'clinic', 'hospital', 'doctors']
 
-# Что считаем в каждой категории (колонка OSM, допустимые значения).
-# Правьте здесь, если нужно добавить/убрать типы объектов.
 CATEGORY_RULES = {
     'Магазины': ('shop', SHOP_TAGS),
     'Медицина': ('amenity', MED_TAGS),
@@ -60,7 +58,7 @@ CAT_COLORS = {'Магазины': '#e67e22', 'Медицина': '#c0392b', 'Ш�
 COUNT_BUFFER_M = 100        # объект считается доступным, если он не дальше 100 м от достижимой улицы
 DEDUP_ANY_M = 15            # объекты одной категории ближе 15 м — один и тот же объект
 DEDUP_SAME_NAME_M = 100     # с одинаковым названием ближе 100 м — тоже один объект
-ONLY_NAMED = True           # True — объекты без названия («—») не считаются
+ONLY_NAMED = False          # ИСПРАВЛЕНО: False — объекты без названия («—») тоже считаются
 
 _TO_UTM = Transformer.from_crs(WGS84, KOSTANAY_UTM_CRS, always_xy=True)
 _TO_WGS = Transformer.from_crs(KOSTANAY_UTM_CRS, WGS84, always_xy=True)
@@ -186,6 +184,7 @@ def load_pois():
         lon = 63.6246 + rng.uniform(-0.05, 0.05)
         data.append({
             'geometry': Point(lon, lat),
+            'name': f"Объект {i+1}",
             'amenity': rng.choice(amenities) if i % 2 == 0 else None,
             'shop': rng.choice(shops) if i % 2 != 0 else None,
             'leisure': 'park' if i % 5 == 0 else None,
@@ -215,10 +214,6 @@ def _geo_diag():
 def geocode_address(address_str, bounds):
     """
     Геокодирование с запасными сервисами: Nominatim -> Photon -> ArcGIS.
-    (Nominatim часто блокирует запросы с облачных хостингов, поэтому нужны запасные.)
-    Возвращает dict(lat, lon, name, approx) или None.
-      approx=True — точный дом не найден, взята улица целиком.
-    Успешные результаты кэшируются в session_state (неудачи — нет).
     """
     if not address_str or len(address_str.strip()) < 3:
         return None
@@ -261,7 +256,7 @@ def geocode_address(address_str, bounds):
     nominatim = Nominatim(user_agent=UA, timeout=10)
     for i, (q, bounded, approx) in enumerate(attempts):
         if i:
-            time.sleep(1.1)  # политика Nominatim: не чаще 1 запроса/сек
+            time.sleep(1.1)
         kwargs = dict(exactly_one=False, limit=5, language="ru", country_codes="kz")
         if bounded:
             kwargs.update(viewbox=viewbox, bounded=True)
@@ -269,7 +264,7 @@ def geocode_address(address_str, bounds):
             results = nominatim.geocode(q, **kwargs)
         except Exception as e:
             log.append(f"Nominatim: {type(e).__name__}")
-            break   # блокировка/таймаут — дальше Nominatim не пробуем
+            break
         for loc in results or []:
             if bounded:
                 ok, _ = validate_coordinates(loc.latitude, loc.longitude, bounds)
@@ -345,7 +340,7 @@ def reverse_geocode(lat, lon):
 # --- 4. ПРОСТРАНСТВЕННЫЙ АНАЛИЗ ---
 
 def get_nearest_node(bundle, lat, lon):
-    """Ближайший узел сети (без зависимости от версии osmnx / scikit-learn)."""
+    """Ближайший узел сети."""
     d = haversine_m(lat, lon, bundle['lats'], bundle['lons'])
     i = int(np.argmin(d))
     return bundle['ids'][i], (float(bundle['lats'][i]), float(bundle['lons'][i])), float(d[i])
@@ -368,11 +363,7 @@ def _edge_line_utm(data, u, v, node_xy):
 
 
 def _collect_segments(G, node_xy, reached, t):
-    """
-    Сегменты улиц, достижимые за t минут.
-    Рёбра, у которых достигнут только один конец, обрезаются на
-    оставшееся время (иначе зона получается «недотянутой»).
-    """
+    """Сегменты улиц, достижимые за t минут."""
     segs, seen = [], set()
     for u, du in reached.items():
         for v, keydict in G[u].items():
@@ -399,10 +390,7 @@ def _collect_segments(G, node_xy, reached, t):
 
 
 def build_isochrones(bundle, center_node):
-    """
-    Изохроны 5/10/15 минут: достижимые сегменты улиц -> буфер -> «замыкание»,
-    чтобы получить сплошную зону, а не тонкую ленту вдоль дороги.
-    """
+    """Изохроны 5/10/15 минут."""
     G, node_xy = bundle['G'], bundle['xy']
     polys = {}
     if center_node not in G:
@@ -419,10 +407,9 @@ def build_isochrones(bundle, center_node):
             continue
         merged = unary_union(segs)
         if t == max(ISO_TIMES):
-            # узкая зона только вокруг достижимых улиц — по ней считаем объекты
             polys['count'] = transform(_TO_WGS.transform, merged.buffer(COUNT_BUFFER_M))
         area = merged.buffer(EDGE_BUFFER_M)
-        area = area.buffer(CLOSING_M).buffer(-CLOSING_M)   # closing
+        area = area.buffer(CLOSING_M).buffer(-CLOSING_M)
         area = fill_poly_holes(area)
         if area is None or area.is_empty:
             continue
@@ -443,7 +430,7 @@ def _poi_name(row):
 
 
 def named_only(gdf):
-    """Оставляет только объекты с названием (если включён ONLY_NAMED)."""
+    """Фильтрует безымянные объекты, если ONLY_NAMED == True."""
     if not ONLY_NAMED or 'name' not in gdf.columns:
         return gdf
     names = gdf['name'].fillna('').astype(str).str.strip()
@@ -451,10 +438,7 @@ def named_only(gdf):
 
 
 def dedupe_pois(gdf):
-    """
-    Убирает дубли одного и того же объекта (точка + контур здания, несколько
-    узлов в одном здании, один магазин, нарисованный дважды).
-    """
+    """Убирает дубли одного и того же объекта."""
     n = len(gdf)
     if n < 2:
         return gdf
@@ -486,7 +470,7 @@ def categorize(pois):
 
 
 def calculate_accessibility(pois_gdf, poly_dict):
-    """Индекс доступности + список реально посчитанных объектов."""
+    """Индекс доступности + список объектов."""
     empty = {cat: 0 for cat in CATEGORY_ORDER}
     cols = ['Категория', 'Название', 'Тип', 'lat', 'lon']
     if pois_gdf.empty or 15 not in poly_dict:
@@ -505,7 +489,7 @@ def calculate_accessibility(pois_gdf, poly_dict):
         scores.append(min(1.0, len(g) / targets[cat]))
         for _, r in g.iterrows():
             pp = r.geometry.representative_point()
-            rows.append({'Категория': cat, 'Название': _poi_name(r) or '—',
+            rows.append({'Категория': cat, 'Название': _poi_name(r) or 'без названия',
                          'Тип': _poi_label(r), 'lat': pp.y, 'lon': pp.x})
 
     details = pd.DataFrame(rows, columns=cols)
@@ -513,7 +497,7 @@ def calculate_accessibility(pois_gdf, poly_dict):
 
 
 def get_business_recommendation(user_lat, user_lon, pois_gdf):
-    """Анализ коммерческого потенциала (радиус BIZ_RADIUS_M по прямой)."""
+    """Анализ коммерческого потенциала."""
     if pois_gdf.empty:
         return "🏪 Продуктовый магазин или Аптека", "Нет данных об инфраструктуре", 0, {}
 
@@ -557,7 +541,7 @@ def get_business_recommendation(user_lat, user_lon, pois_gdf):
 
 
 def analyze_location(address, bundle, pois_gdf):
-    """Геокодинг (или координаты) -> привязка -> изохроны -> индекс. Возвращает (result, error)."""
+    """Анализ локации."""
     bounds = bundle['bounds']
     max_snap = st.session_state.get('max_snap', MAX_SNAP_DISTANCE_M)
     approx = False
@@ -566,25 +550,23 @@ def analyze_location(address, bundle, pois_gdf):
     if coords:
         lat, lon = coords
         if not validate_coordinates(lat, lon, bounds)[0] and validate_coordinates(lon, lat, bounds)[0]:
-            lat, lon = lon, lat   # перепутаны широта и долгота
+            lat, lon = lon, lat
         found_name = "координаты заданы вручную"
     else:
         geo = geocode_address(address, bounds)
         if geo is None:
-            return None, (f"Адрес «{address}» не найден геокодером (в OSM может не быть этого дома). "
+            return None, (f"Адрес «{address}» не найден геокодером. "
                           "Введите координаты «широта, долгота» или выберите точку на карте." + _geo_diag())
         lat, lon, found_name, approx = geo['lat'], geo['lon'], geo['name'], geo['approx']
 
     ok, msg = validate_coordinates(lat, lon, bounds)
     if not ok:
-        return None, (f"{msg}: точка ({lat:.5f}, {lon:.5f}) лежит за пределами загруженной "
-                      "дорожной сети. Пересоберите граф с большей областью (build_graph.py).")
+        return None, f"{msg}: точка ({lat:.5f}, {lon:.5f}) за пределами сети."
 
     node, node_ll, snap_dist = get_nearest_node(bundle, lat, lon)
     if snap_dist > max_snap:
-        return None, (f"Ближайший узел дорожной сети в {snap_dist:.0f} м от точки ({lat:.5f}, {lon:.5f}), "
-                      f"допустимо {max_snap} м. Скорее всего, граф здесь неполный — "
-                      "увеличьте лимит в сайдбаре или пересоберите граф.")
+        return None, (f"Ближайший узел сети в {snap_dist:.0f} м от точки ({lat:.5f}, {lon:.5f}), "
+                      f"допустимо {max_snap} м.")
 
     polys, n_reached = build_isochrones(bundle, node)
     if 15 not in polys:
@@ -601,7 +583,6 @@ def analyze_location(address, bundle, pois_gdf):
 
 
 def resolve_point(text, bundle):
-    """Адрес или координаты -> ((lat, lon), error)."""
     bounds = bundle['bounds']
     coords = parse_coords(text)
     if coords:
@@ -611,8 +592,7 @@ def resolve_point(text, bundle):
     else:
         geo = geocode_address(text, bounds)
         if geo is None:
-            return None, (f"Адрес «{text}» не найден." + _geo_diag() + " Введите координаты "
-                          "или выберите точку на карте.")
+            return None, f"Адрес «{text}» не найден." + _geo_diag()
         lat, lon = geo['lat'], geo['lon']
     ok, msg = validate_coordinates(lat, lon, bounds)
     if not ok:
@@ -658,7 +638,6 @@ def add_isochrones_to_map(m, poly_dict, addr_latlon, node_latlon, label="", colo
 
 
 def add_network_layer(m, bundle, lat, lon, radius_m=2000):
-    """Диагностика: рисует рёбра графа вокруг точки и общую границу графа."""
     G = bundle['G']
     d = haversine_m(lat, lon, bundle['lats'], bundle['lons'])
     near = {bundle['ids'][i] for i in np.where(d <= radius_m)[0]}
@@ -684,7 +663,6 @@ def _fill(key, text):
 
 
 def map_picker(targets, bundle):
-    """Выбор точки кликом по карте и подстановка координат в поле ввода."""
     minx, miny, maxx, maxy = bundle['bounds']
     with st.expander("🗺️ Адрес не находится? Выберите точку кликом по карте"):
         m = folium.Map(location=[(miny + maxy) / 2, (minx + maxx) / 2], zoom_start=12,
@@ -741,7 +719,7 @@ with st.sidebar.expander("🔧 Диагностика графа"):
 
 st.sidebar.slider("Макс. расстояние привязки к сети, м", 50, 1000, 300, 50, key="max_snap")
 show_net = st.sidebar.checkbox("🛣️ Показать дорожную сеть и границы графа")
-show_pois = st.sidebar.checkbox("📍 Показать посчитанные объекты на карте")
+show_pois = st.sidebar.checkbox("📍 Показать посчитанные объекты на карте", value=True)
 
 st.session_state.setdefault('last_analysis', None)
 st.session_state.setdefault('comparison', None)
@@ -789,7 +767,7 @@ if mode == "Анализ адреса":
         c4.metric("Образование", data['counts'].get('Школы', 0) + data['counts'].get('Детсады', 0))
 
         with st.expander("📋 Какие объекты посчитаны (сверьте с картой)"):
-            st.caption(f"Дубли (точка + контур здания) объединены; учитываются объекты не дальше "
+            st.caption(f"Дубли объединены; учитываются объекты не дальше "
                        f"{COUNT_BUFFER_M} м от улиц, достижимых за 15 минут.")
             st.dataframe(data['details'][['Категория', 'Название', 'Тип']],
                          use_container_width=True, hide_index=True)
@@ -837,7 +815,6 @@ if mode == "Анализ адреса":
                 else:
                     st.info("ℹ️ Точка вне 15-минутной зоны")
 
-                # радиус анализа и объекты внутри него
                 folium.Circle([biz_lat, biz_lon], radius=BIZ_RADIUS_M, color="orange",
                               weight=2, fill=False, dash_array="6",
                               tooltip=f"Радиус анализа {BIZ_RADIUS_M} м").add_to(m)
@@ -921,6 +898,20 @@ else:
                               label="Локация 2: ",
                               colors={5: '#3498db', 10: '#2980b9', 15: '#5d6d7e'})
         fit_map(m, [r1['poly_dict'], r2['poly_dict']])
+
+        # ИСПРАВЛЕНО: Добавлена отрисовка маркеров объектов в режиме сравнения
+        if show_pois:
+            for r_data, prefix in [(r1, "Локация 1: "), (r2, "Локация 2: ")]:
+                for _, row in r_data['details'].iterrows():
+                    folium.CircleMarker(
+                        [row['lat'], row['lon']],
+                        radius=5,
+                        color=CAT_COLORS[row['Категория']],
+                        fill=True,
+                        fill_opacity=0.9,
+                        tooltip=f"{prefix}{row['Категория']}: {row['Название']}"
+                    ).add_to(m)
+
         if show_net:
             add_network_layer(m, bundle, r1['lat'], r1['lon'])
             add_network_layer(m, bundle, r2['lat'], r2['lon'])
@@ -928,3 +919,4 @@ else:
         st_folium(m, width=1200, height=550, key="compare_map", returned_objects=[])
     else:
         st.info("👈 Введите два адреса и нажмите 'Сравнить'")
+                
