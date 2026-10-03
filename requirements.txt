@@ -1,0 +1,11 @@
+streamlit
+streamlit-folium
+folium
+osmnx
+geopandas
+networkx
+shapely
+pyproj
+geopy
+numpy
+pandas
