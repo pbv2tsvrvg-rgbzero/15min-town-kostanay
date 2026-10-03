@@ -58,7 +58,7 @@ CAT_COLORS = {'Магазины': '#e67e22', 'Медицина': '#c0392b', 'Ш�
 COUNT_BUFFER_M = 100        # объект считается доступным, если он не дальше 100 м от достижимой улицы
 DEDUP_ANY_M = 15            # объекты одной категории ближе 15 м — один и тот же объект
 DEDUP_SAME_NAME_M = 100     # с одинаковым названием ближе 100 м — тоже один объект
-ONLY_NAMED = False          # ИСПРАВЛЕНО: False — объекты без названия («—») тоже считаются
+ONLY_NAMED = False          # False — объекты без названия («—») тоже считаются
 
 _TO_UTM = Transformer.from_crs(WGS84, KOSTANAY_UTM_CRS, always_xy=True)
 _TO_WGS = Transformer.from_crs(KOSTANAY_UTM_CRS, WGS84, always_xy=True)
@@ -174,7 +174,7 @@ def load_pois():
         except Exception:
             pass
 
-    # Резервная генерация (ДЕМО-данные!)
+    # Резервная генерация (ДЕМО-данные)
     rng = random.Random(42)
     data = []
     amenities = ['school', 'kindergarten', 'pharmacy', 'clinic', 'hospital']
@@ -212,9 +212,7 @@ def _geo_diag():
 
 
 def geocode_address(address_str, bounds):
-    """
-    Геокодирование с запасными сервисами: Nominatim -> Photon -> ArcGIS.
-    """
+    """Геокодирование с запасными сервисами: Nominatim -> Photon -> ArcGIS."""
     if not address_str or len(address_str.strip()) < 3:
         return None
 
@@ -241,7 +239,7 @@ def geocode_address(address_str, bounds):
         st.session_state['_geo_log'] = None
         return cache[key]
 
-    # --- 1. Nominatim ---
+    # 1. Nominatim
     attempts = []
     if house:
         attempts.append(({"street": f"{house} {street}", "city": "Костанай"}, True, False))
@@ -275,7 +273,7 @@ def geocode_address(address_str, bounds):
     else:
         log.append("Nominatim: нет результатов")
 
-    # --- 2–3. Запасные сервисы ---
+    # 2–3. Запасные сервисы (Photon, ArcGIS)
     def photon_fn(q):
         res = Photon(user_agent=UA, timeout=10).geocode(
             q, exactly_one=False, limit=5, location_bias=center)
@@ -899,7 +897,6 @@ else:
                               colors={5: '#3498db', 10: '#2980b9', 15: '#5d6d7e'})
         fit_map(m, [r1['poly_dict'], r2['poly_dict']])
 
-        # ИСПРАВЛЕНО: Добавлена отрисовка маркеров объектов в режиме сравнения
         if show_pois:
             for r_data, prefix in [(r1, "Локация 1: "), (r2, "Локация 2: ")]:
                 for _, row in r_data['details'].iterrows():
@@ -919,4 +916,3 @@ else:
         st_folium(m, width=1200, height=550, key="compare_map", returned_objects=[])
     else:
         st.info("👈 Введите два адреса и нажмите 'Сравнить'")
-                
